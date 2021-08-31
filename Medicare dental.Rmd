@@ -1,0 +1,323 @@
+---
+title: "Medicare dental"
+author: "Sanjay Basu"
+date: "8/31/2021"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Only need to run these once:
+# install.packages("foreign")  
+# install.packages("survey")
+# install.packages("devtools")
+# install.packages("tidyverse")
+# install.packages("readr")
+# install.packages("tableone")
+#library(devtools)
+#install_github("e-mitchell/meps_r_pkg/MEPS")
+
+# Run these every time you re-start R:
+library(foreign)
+library(survey)
+library(devtools)
+library(tidyverse)
+library(readr)
+library(MEPS)
+library(tableone)
+
+
+
+# Specifying year and MEPS data type [longitudinal data]
+df14 = read_MEPS(year = 2014, file = "h172")
+df15 = read_MEPS(year = 2015, file = "h183")
+df16 = read_MEPS(year = 2016, file = "h193")
+df17 = read_MEPS(year = 2017, file = "h202")
+df18 = read_MEPS(year = 2018, file = "h210")
+
+df = bind_rows(list(df14,df15,df16,df17,df18))
+
+df$newwt = df$LONGWT/5
+df = as_tibble(df)
+
+```
+
+## Download MEPS data
+
+```{r df}
+
+
+# restrict to medicare
+df = df %>%
+  filter(INSURCY2==4 | INSURCY2==5 | INSURCY2==6) %>% # https://www.meps.ahrq.gov/mepsweb/data_stats/download_data_files_codebook.jsp?PUFId=H172&varName=INSURCY2
+  mutate(total_mcare = T) 
+
+
+
+# how many people had new dental insurance during MEPS
+df$nodental = (df$DENTIN1==2 | df$DENTIN2==2 | df$DENTIN3==2 | df$DENTIN4==2 | df$DENTIN5==2)
+
+# by race/ethnicity
+df <- df %>%
+  mutate(
+    hisp   = (RACETHX == 1),
+    white  = (RACETHX == 2),
+    black  = (RACETHX == 3),
+    native = (RACETHX > 3 & RACEV1X %in% c(3,6)),
+    asian  = (RACETHX > 3 & RACEV1X %in% c(4,5)),
+    
+    race = 1*hisp + 2*white + 3*black + 4*native + 5*asian,
+    race = recode_factor(race,
+                         "1" = "Hispanic",
+                         "2" = "White",
+                         "3" = "Black",
+                         "4" = "Amer. Indian, AK Native, or mult. races",
+                         "5" = "Asian, Hawaiian, or Pacific Islander"))
+
+# by income subgroup
+df <- df %>%
+  mutate(
+    poor   = (POVCATY1 == 1),
+    nearpoor  = (POVCATY1 == 2),
+    lowinc  = (POVCATY1 == 3),
+    midinc = (POVCATY1 == 4),
+    hiinc  = (POVCATY1 == 5),
+    
+    income = 1*poor + 2*nearpoor + 3*lowinc + 4*midinc + 5*hiinc,
+    income = recode_factor(income,
+                         "1" = "</= 100% poverty line",
+                         "2" = "101-125% poverty line",
+                         "3" = "126-200% poverty line",
+                         "4" = "201-400% poverty line",
+                         "5" = ">/= 400% poverty line"))
+
+# by region
+df <- df %>%
+  mutate(
+    northeast   = (REGIONY1 == 1),
+    midwest  = (REGIONY1 == 2),
+    south  = (REGIONY1 == 3),
+    west = (REGIONY1 == 4),
+    
+    region = 1*northeast + 2*midwest + 3*south + 4*west,
+    region = recode_factor(income,
+                           "1" = "Northeast",
+                           "2" = "Midwest",
+                           "3" = "South",
+                           "4" = "West"))
+
+# who had no annual visits at baseline
+df$noannvisit_baseline = (df$DVTOTY1==0 | df$DVTOTY2==0)
+
+# edentulous at baseline
+df$edentulous_baseline = (df$LSTETH5==1)
+
+# apply survey sample weights
+options(survey.lonely.psu='adjust')
+mepsdsgn <- svydesign(
+  id = ~VARPSU,
+  strata = ~VARSTR,
+  weights = ~newwt,
+  data = df,
+  nest = TRUE)  
+
+
+tab0 <- svyCreateTableOne(vars = c("total_mcare","race", "income","region","noannvisit_baseline","edentulous_baseline"),
+                          data = mepsdsgn,
+                          strata = "nodental",
+                          factorVars =  c("nodental","race","income", "region"))
+tab0
+
+
+```
+
+
+## Outcome 1
+
+```{r out 1}
+
+# restrict to those without other dental insurance at any point in survey
+df = df %>%
+  filter(nodental==1) # https://www.meps.ahrq.gov/mepsweb/data_stats/download_data_files_codebook.jsp?PUFId=H210&varName=DENTIN1
+  
+df$newcover_nomeans = T
+df$newcover_means = (df$POVCATY1==1 | df$POVCATY1==2 | df$POVCATY1==3 | df$POVCATY2==1 | df$POVCATY2==2 | df$POVCATY2==3) # https://www.meps.ahrq.gov/mepsweb/data_stats/download_data_files_codebook.jsp?PUFId=H210&varName=POVCATY1
+# see poverty status categories at: https://www.meps.ahrq.gov/survey_comp/hc_technical_notes.shtml
+
+
+
+# apply survey sample weights
+options(survey.lonely.psu='adjust')
+mepsdsgn <- svydesign(
+  id = ~VARPSU,
+  strata = ~VARSTR,
+  weights = ~newwt,
+  data = df,
+  nest = TRUE)  
+
+# OUTCOME 1: overall coverage number
+# if means tested, coverage just for those <200% FPL
+svytotal(~newcover_means, design = mepsdsgn)
+
+# if not means tested
+svytotal(~newcover_nomeans, design = mepsdsgn)
+
+
+
+```
+
+## Outcome 2
+
+```{r out 2}
+
+
+# OUTCOME 2: how many people have an annual visit 
+# if means tested, we increase the probability of an annual visit by 7.2 percentage points among those who didn't have a annual visit before 
+set.seed(123)
+df$newvisit_means = (df$noannvisit_baseline==1)*(df$newcover_means==1)*rbinom(dim(df)[1],1,0.072) # https://www.healthaffairs.org/doi/10.1377/hlthaff.2020.00386
+# if not means tested, we increase the probability to match that of insured people, which is 58.8%
+set.seed(123)
+df$newvisit_nomeans = (df$noannvisit_baseline==1)*rbinom(dim(df)[1],1,0.588) # 58.8% calculated from MEPS if changing line 33 to those with continuous coverage
+
+mepsdsgn <- svydesign(
+  id = ~VARPSU,
+  strata = ~VARSTR,
+  weights = ~newwt,
+  data = df,
+  nest = TRUE)  
+svytotal(~noannvisit_baseline, design = mepsdsgn) # currently having no annual visit
+svytotal(~newvisit_means, design = mepsdsgn) # newly having annual visit, if means tested
+svytotal(~newvisit_nomeans, design = mepsdsgn) # newly having annual visit, if not means tested
+
+
+```
+
+## Outcome 3
+
+```{r out 3}
+
+
+
+# OUTCOME 3: resulting difference in edentulism
+
+#reduced risk of edentulism at baseline = 0.223 x previous risk
+df$edentulous_means = (df$LSTETH5==1)*(df$newvisit_means==1)*(rbinom(dim(df)[1],1,1-0.230))
+df$edentulous_nomeans = (df$LSTETH5==1)*(df$newvisit_nomeans==1)*(rbinom(dim(df)[1],1,1-0.230))
+
+mepsdsgn <- svydesign(
+  id = ~VARPSU,
+  strata = ~VARSTR,
+  weights = ~newwt,
+  data = df,
+  nest = TRUE)  
+svytotal(~edentulous_baseline, design = mepsdsgn) # currently expected to become edentulous annually
+svytotal(~edentulous_means, design = mepsdsgn) # if means tested, expected to become edentulous annually
+svytotal(~edentulous_nomeans, design = mepsdsgn) # if not means tested, expected to become edentulous annually
+
+
+```
+
+## formatted table
+
+```{r tab}
+
+
+# output weighted/formatted table
+tab1 <- svyCreateTableOne(vars = c("total_mcare","newcover_means","newcover_nomeans", "noannvisit_baseline","newvisit_means","newvisit_nomeans","edentulous_baseline","edentulous_means","edentulous_nomeans"),
+                          data = mepsdsgn,
+                          factorVars =  c("total_mcare","newcover_means","newcover_nomeans", "noannvisit_baseline","newvisit_means","newvisit_nomeans","edentulous_baseline","edentulous_means","edentulous_nomeans"))
+tab1
+
+```
+
+
+## Subgroup analysis 1: by race/ethnicity
+
+```{r sub 1}
+
+
+mepsdsgn <- svydesign(
+  id = ~VARPSU,
+  strata = ~VARSTR,
+  weights = ~newwt,
+  data = df,
+  nest = TRUE)  
+
+# output weighted/formatted table with race/ethnic subgroups
+tab2 <- svyCreateTableOne(vars = c("total_mcare","newcover_means","newcover_nomeans", "noannvisit_baseline","newvisit_means","newvisit_nomeans","edentulous_baseline","edentulous_means","edentulous_nomeans"),
+                          data = mepsdsgn,
+                          strata = "race",
+                          factorVars =  c("total_mcare","newcover_means","newcover_nomeans", "noannvisit_baseline","newvisit_means","newvisit_nomeans","edentulous_baseline","edentulous_means","edentulous_nomeans"))
+tab2
+
+```
+
+
+
+## Subgroup analysis 2: by income
+
+```{r sub 2}
+
+
+
+
+mepsdsgn <- svydesign(
+  id = ~VARPSU,
+  strata = ~VARSTR,
+  weights = ~newwt,
+  data = df,
+  nest = TRUE)  
+
+# output weighted/formatted table with income subgroups
+tab3 <- svyCreateTableOne(vars = c("total_mcare","newcover_means","newcover_nomeans", "noannvisit_baseline","newvisit_means","newvisit_nomeans","edentulous_baseline","edentulous_means","edentulous_nomeans"),
+                          data = mepsdsgn,
+                          strata = "income",
+                          factorVars =  c("total_mcare","newcover_means","newcover_nomeans", "noannvisit_baseline","newvisit_means","newvisit_nomeans","edentulous_baseline","edentulous_means","edentulous_nomeans"))
+tab3
+
+
+```
+
+
+
+
+## Subgroup analysis 3: by income
+
+```{r sub 3}
+
+
+
+mepsdsgn <- svydesign(
+  id = ~VARPSU,
+  strata = ~VARSTR,
+  weights = ~newwt,
+  data = df,
+  nest = TRUE)  
+
+# output weighted/formatted table with region subgroups
+tab4 <- svyCreateTableOne(vars = c("total_mcare","newcover_means","newcover_nomeans", "noannvisit_baseline","newvisit_means","newvisit_nomeans","edentulous_baseline","edentulous_means","edentulous_nomeans"),
+                          data = mepsdsgn,
+                          strata = "region",
+                          factorVars =  c("total_mcare","newcover_means","newcover_nomeans", "noannvisit_baseline","newvisit_means","newvisit_nomeans","edentulous_baseline","edentulous_means","edentulous_nomeans"))
+tab4
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
